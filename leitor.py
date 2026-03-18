@@ -12,7 +12,6 @@ import re
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 VISION_URL = "https://vision.googleapis.com/v1/images:annotate?key=" + GOOGLE_API_KEY
 
-# Sentidos de cada dial (alternados)
 ORIENTACOES = ["anticlockwise", "clockwise", "anticlockwise", "clockwise"]
 
 
@@ -33,17 +32,10 @@ def load_cv2_from_bytes(img_bytes):
 # ─────────────────────────────────────────────
 def preprocessar(img):
     try:
-        # Converte para escala de cinza
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Remove reflexo preservando bordas
         gray = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
-
-        # Aumenta contraste local
         clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
         gray = clahe.apply(gray)
-
-        # Binariza (preto e branco) por região
         binary = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -51,18 +43,12 @@ def preprocessar(img):
             blockSize=21,
             C=8
         )
-
-        # Remove ruído
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-
         return gray, binary
-
-    except Exception as e:
+    except Exception:
         h, w = img.shape[:2]
-        gray = np.zeros((h, w), dtype=np.uint8)
-        binary = np.zeros((h, w), dtype=np.uint8)
-        return gray, binary
+        return np.zeros((h, w), dtype=np.uint8), np.zeros((h, w), dtype=np.uint8)
 
 
 # ─────────────────────────────────────────────
@@ -121,8 +107,7 @@ def recortar_dials(img, gray):
 
         return dials, centros
 
-    except Exception as e:
-        # Fallback total: divide em 4 partes iguais
+    except Exception:
         h, w = img.shape[:2]
         dials = []
         centros = []
@@ -138,16 +123,14 @@ def recortar_dials(img, gray):
 # ─────────────────────────────────────────────
 # GOOGLE VISION: detectar números no dial
 # ─────────────────────────────────────────────
-def detectar_numeros_no_dial(dial_img):
-    """
-    Envia o recorte do dial para o Google Vision e extrai
-    os dígitos de 0-9 encontrados com suas posições (x, y).
-    """
+def detectar_numeros_no_dial(dial_img_gray):
     if not GOOGLE_API_KEY:
         return []
 
     try:
-        _, buf = cv2.imencode('.jpg', dial_img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        # Converte grayscale para BGR para poder encodar
+        dial_bgr = cv2.cvtColor(dial_img_gray, cv2.COLOR_GRAY2BGR)
+        _, buf = cv2.imencode('.jpg', dial_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
         b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
 
         payload = {
@@ -166,7 +149,7 @@ def detectar_numeros_no_dial(dial_img):
 
         numeros = []
 
-        # Pula o primeiro item (é o texto completo), pega os individuais
+        # Pula o primeiro (texto completo), pega os individuais
         for item in anotacoes[1:]:
             texto = item.get("description", "").strip()
             if not re.match(r'^\d$', texto):
@@ -190,29 +173,23 @@ def detectar_numeros_no_dial(dial_img):
 
 
 # ─────────────────────────────────────────────
-# PIXEL → ÂNGULO em relação ao centro do dial
+# PIXEL → ÂNGULO em relação ao centro
 # ─────────────────────────────────────────────
 def pixel_para_angulo(px, py, cx, cy):
-    """
-    0° = topo (12h), cresce no sentido horário.
-    """
     dx = px - cx
-    dy = cy - py  # inverte Y (Y cresce para baixo na imagem)
-    angulo = math.degrees(math.atan2(dx, dy)) % 360
-    return angulo
+    dy = cy - py  # inverte Y
+    return math.degrees(math.atan2(dx, dy)) % 360
 
 
 # ─────────────────────────────────────────────
-# DETECTAR COR VERMELHA DO PONTEIRO
+# DETECTAR PONTEIRO VERMELHO
 # ─────────────────────────────────────────────
-def detectar_vermelho(dial_img, cx, cy, r):
+def detectar_vermelho(dial_img_color, cx, cy, r):
     try:
-        hsv = cv2.cvtColor(dial_img, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(dial_img_color, cv2.COLOR_BGR2HSV)
         m1 = cv2.inRange(hsv, np.array([0, 120, 80]), np.array([8, 255, 255]))
         m2 = cv2.inRange(hsv, np.array([168, 120, 80]), np.array([180, 255, 255]))
         mask = cv2.bitwise_or(m1, m2)
-
-        # Remove área central (pivot)
         cv2.circle(mask, (cx, cy), int(r * 0.14), 0, -1)
 
         pts = cv2.findNonZero(mask)
@@ -236,7 +213,7 @@ def detectar_vermelho(dial_img, cx, cy, r):
 
 
 # ─────────────────────────────────────────────
-# DETECTAR PONTEIRO VIA HOUGH LINES (imagem P&B)
+# DETECTAR PONTEIRO VIA HOUGH LINES
 # ─────────────────────────────────────────────
 def detectar_por_linhas(binary, cx, cy, r):
     try:
@@ -318,20 +295,20 @@ def detectar_por_fatias(binary, cx, cy, r):
 
 
 # ─────────────────────────────────────────────
-# DETECTAR ÂNGULO DO PONTEIRO (junta tudo)
+# DETECTAR ÂNGULO DO PONTEIRO
 # ─────────────────────────────────────────────
-def detectar_angulo_ponteiro(dial_img):
+def detectar_angulo_ponteiro(dial_gray):
     try:
-        h, w = dial_img.shape[:2]
+        h, w = dial_gray.shape[:2]
         cx, cy = w // 2, h // 2
         r = min(w, h) // 2
 
-        # Pré-processa o dial em P&B
-        dial_gray = cv2.cvtColor(dial_img, cv2.COLOR_BGR2GRAY)
-        dial_gray = cv2.bilateralFilter(dial_gray, 9, 75, 75)
-        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
-        dial_gray = clahe.apply(dial_gray)
+        # Máscara circular
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.circle(mask, (cx, cy), int(r * 0.82), 255, -1)
+        cv2.circle(mask, (cx, cy), int(r * 0.14), 0, -1)
 
+        # Binariza o dial (já vem em grayscale)
         binary = cv2.adaptiveThreshold(
             dial_gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -339,25 +316,14 @@ def detectar_angulo_ponteiro(dial_img):
             blockSize=21,
             C=8
         )
-
-        # Máscara circular (ignora bordas do mostrador)
-        mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(mask, (cx, cy), int(r * 0.82), 255, -1)
-        # Remove o pivot central
-        cv2.circle(mask, (cx, cy), int(r * 0.14), 0, -1)
         binary = cv2.bitwise_and(binary, mask)
 
-        # Tentativa 1: ponteiro vermelho
-        ang = detectar_vermelho(dial_img, cx, cy, r)
-        if ang is not None:
-            return ang
-
-        # Tentativa 2: Hough Lines na imagem P&B
+        # Tentativa 1: Hough Lines
         ang = detectar_por_linhas(binary, cx, cy, r)
         if ang is not None:
             return ang
 
-        # Tentativa 3: varredura por fatias
+        # Tentativa 2: varredura por fatias
         ang = detectar_por_fatias(binary, cx, cy, r)
         return ang
 
@@ -366,52 +332,54 @@ def detectar_angulo_ponteiro(dial_img):
 
 
 # ─────────────────────────────────────────────
-# REGRA PRINCIPAL: ponteiro + números impressos
+# DEDUZIR NÚMERO FALTANTE (ponteiro tampando)
 # ─────────────────────────────────────────────
-def digito_pelo_ponteiro_e_numeros(angulo_ponteiro, numeros_detectados, orientacao, dial_img):
-    """
-    Regras (como um leiturista humano):
-    1. Converte posição de cada número impresso em ângulo.
-    2. Ordena os números pelo ângulo no mostrador.
-    3. Acha entre quais dois números o ponteiro está.
-    4. Se entre dois números → dígito é o MENOR (o que já passou).
-    5. Se exatamente em cima de um número → é aquele número.
-    6. Se ponteiro tampando um número → deduz pelo anterior e próximo.
-    """
+def deduzir_numero_faltante(numeros_detectados):
     try:
-        h, w = dial_img.shape[:2]
-        cx = w // 2
-        cy = h // 2
+        if len(numeros_detectados) != 9:
+            return None
+        detectados = set(d for (d, px, py) in numeros_detectados)
+        todos = set(range(10))
+        faltando = todos - detectados
+        if len(faltando) == 1:
+            return faltando.pop()
+        return None
+    except Exception:
+        return None
 
+
+# ─────────────────────────────────────────────
+# REGRA: ponteiro + números impressos → dígito
+# ─────────────────────────────────────────────
+def digito_pelo_ponteiro_e_numeros(angulo_ponteiro, numeros_detectados, orientacao, cx, cy):
+    try:
         if not numeros_detectados:
             return angulo_para_digito_simples(angulo_ponteiro, orientacao)
 
-        # Converte cada número impresso para ângulo
+        # Converte cada número para ângulo
         num_angulos = []
         for (digito, px, py) in numeros_detectados:
             ang = pixel_para_angulo(px, py, cx, cy)
             num_angulos.append((digito, ang))
 
-        # Ordena por ângulo (sentido horário a partir do topo)
+        # Ordena por ângulo
         num_angulos.sort(key=lambda x: x[1])
 
-        # Ajusta o ângulo do ponteiro conforme orientação do dial
+        # Ajusta o ângulo do ponteiro conforme orientação
         ang_pont = angulo_ponteiro
         if orientacao == "anticlockwise":
             ang_pont = (360 - ang_pont) % 360
 
-        # Verifica se o ponteiro está exatamente em cima de algum número
-        TOLERANCIA_EXATA = 15  # graus
-
+        # REGRA 1: ponteiro exatamente em cima de um número (±15°)
+        TOLERANCIA = 15
         for (digito, ang_num) in num_angulos:
             diff = abs(ang_pont - ang_num)
             if diff > 180:
                 diff = 360 - diff
-            if diff <= TOLERANCIA_EXATA:
+            if diff <= TOLERANCIA:
                 return digito
 
-        # Encontra entre quais dois números o ponteiro está
-        # O dígito é sempre o MENOR (o que já passou)
+        # REGRA 2: entre dois números → pega sempre o MENOR
         for i in range(len(num_angulos)):
             d_atual, ang_atual = num_angulos[i]
             d_proximo, ang_proximo = num_angulos[(i + 1) % len(num_angulos)]
@@ -420,12 +388,12 @@ def digito_pelo_ponteiro_e_numeros(angulo_ponteiro, numeros_detectados, orientac
             if ang_atual <= ang_pont < ang_proximo:
                 return d_atual
 
-            # Caso de virada (entre 9 e 0, passando 360°)
+            # Caso de virada (9 → 0 passando pelo 360°)
             if ang_atual > ang_proximo:
                 if ang_pont >= ang_atual or ang_pont < ang_proximo:
                     return d_atual
 
-        # Fallback: número com ângulo mais próximo do ponteiro
+        # Fallback: número com ângulo mais próximo
         mais_proximo = min(
             num_angulos,
             key=lambda x: min(abs(ang_pont - x[1]), 360 - abs(ang_pont - x[1]))
@@ -449,31 +417,61 @@ def angulo_para_digito_simples(angle, orientation):
 
 
 # ─────────────────────────────────────────────
-# DEDUZIR NÚMERO FALTANTE (ponteiro tampando)
+# LER UM DIAL INDIVIDUAL (chamado pelo main.py)
 # ─────────────────────────────────────────────
-def deduzir_numero_faltante(numeros_detectados):
+def ler_dial_individual(dial_gray, orientacao, indice):
     """
-    Se detectou 9 números (faltando 1), descobre qual é pela sequência 0-9.
-    Exemplo: detectou 7, 9 mas não o 8 → o 8 está faltando (ponteiro em cima).
+    Recebe um dial em grayscale (já pré-processado).
+    Retorna dict com digito, angulo, info.
     """
     try:
-        if len(numeros_detectados) != 9:
-            return None
+        h, w = dial_gray.shape[:2]
+        cx, cy = w // 2, h // 2
+        r = min(w, h) // 2
 
-        detectados = set(d for (d, px, py) in numeros_detectados)
-        todos = set(range(10))
-        faltando = todos - detectados
+        # 1. Detecta ângulo do ponteiro
+        angulo = detectar_angulo_ponteiro(dial_gray)
 
-        if len(faltando) == 1:
-            return faltando.pop()
-        return None
+        if angulo is None:
+            return {
+                "digito": None,
+                "angulo": None,
+                "info": f"dial {indice+1}: ponteiro não detectado"
+            }
 
-    except Exception:
-        return None
+        # 2. Detecta números impressos via Google Vision
+        numeros = detectar_numeros_no_dial(dial_gray)
+        info = f"dial {indice+1}: {len(numeros)} números detectados, ângulo={round(angulo,1)}°"
+
+        # 3. Verifica número faltante (ponteiro tampando)
+        faltando = deduzir_numero_faltante(numeros)
+        if faltando is not None:
+            dx = int(cx + r * 0.38 * math.sin(math.radians(angulo)))
+            dy = int(cy - r * 0.38 * math.cos(math.radians(angulo)))
+            numeros.append((faltando, dx, dy))
+            info += f" | nº {faltando} deduzido (ponteiro em cima)"
+
+        # 4. Determina o dígito pela regra dos números + ponteiro
+        digito = digito_pelo_ponteiro_e_numeros(
+            angulo, numeros, orientacao, cx, cy
+        )
+
+        return {
+            "digito": digito,
+            "angulo": round(angulo, 1),
+            "info": info
+        }
+
+    except Exception as e:
+        return {
+            "digito": None,
+            "angulo": None,
+            "info": f"dial {indice+1}: erro - {str(e)}"
+        }
 
 
 # ─────────────────────────────────────────────
-# FUNÇÃO PRINCIPAL
+# FUNÇÃO PRINCIPAL (compatibilidade)
 # ─────────────────────────────────────────────
 def ler_medidor(img_bytes):
     try:
@@ -481,83 +479,47 @@ def ler_medidor(img_bytes):
         if img is None:
             return {"erro": "Imagem inválida ou corrompida."}
 
-        # Redimensiona se muito grande
         h, w = img.shape[:2]
         if w > 1400:
             scale = 1400 / w
             img = cv2.resize(img, (1400, int(h * scale)))
 
-        # Pré-processamento geral
         gray, binary = preprocessar(img)
-
-        # Recorta os 4 dials
         dials, centros = recortar_dials(img, gray)
 
         if len(dials) < 4:
-            return {
-                "erro": "Não encontrei 4 dials. Tente foto mais próxima e centralizada.",
-                "dica": "Enquadre apenas os 4 relógios do medidor na foto."
-            }
+            return {"erro": "Não encontrei 4 dials."}
 
-        digitos_finais = []
+        digitos = []
         angulos = []
         infos = []
 
         for i, (dial_img, orientacao) in enumerate(zip(dials, ORIENTACOES)):
-            info_dial = f"dial {i + 1} ({orientacao}): "
+            dial_gray = cv2.cvtColor(dial_img, cv2.COLOR_BGR2GRAY)
+            dial_gray = cv2.bilateralFilter(dial_gray, 9, 75, 75)
+            clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+            dial_gray = clahe.apply(dial_gray)
 
-            # 1. Detecta o ângulo do ponteiro
-            angulo = detectar_angulo_ponteiro(dial_img)
-            angulos.append(round(angulo, 1) if angulo is not None else None)
+            resultado = ler_dial_individual(dial_gray, orientacao, i)
+            digitos.append(resultado.get("digito"))
+            angulos.append(resultado.get("angulo"))
+            infos.append(resultado.get("info"))
 
-            if angulo is None:
-                digitos_finais.append(None)
-                infos.append(info_dial + "ponteiro não detectado")
-                continue
-
-            # 2. Detecta os números impressos no dial via Google Vision
-            numeros = detectar_numeros_no_dial(dial_img)
-            info_dial += f"{len(numeros)} números detectados"
-
-            # 3. Verifica se falta algum número (ponteiro tampando)
-            faltando = deduzir_numero_faltante(numeros)
-            if faltando is not None:
-                dh, dw = dial_img.shape[:2]
-                cx = dw // 2
-                cy = dh // 2
-                r = min(dw, dh) // 2
-                # Insere o número faltante na posição do ponteiro
-                dx = int(cx + r * 0.38 * math.sin(math.radians(angulo)))
-                dy = int(cy - r * 0.38 * math.cos(math.radians(angulo)))
-                numeros.append((faltando, dx, dy))
-                info_dial += f" | número {faltando} deduzido (ponteiro em cima)"
-
-            infos.append(info_dial)
-
-            # 4. Determina o dígito pela regra: ponteiro + números impressos
-            digito = digito_pelo_ponteiro_e_numeros(
-                angulo, numeros, orientacao, dial_img
-            )
-            digitos_finais.append(digito)
-
-        # Verifica se leu todos os 4 dials
-        if any(d is None for d in digitos_finais):
+        if any(d is None for d in digitos):
             return {
-                "erro": "Não detectei todos os ponteiros. "
-                        "Tente foto mais iluminada e sem reflexo no vidro.",
-                "digitos": digitos_finais,
+                "erro": "Não detectei todos os ponteiros.",
+                "digitos": digitos,
                 "angulos": angulos,
                 "infos": infos
             }
 
-        leitura = int("".join(str(d) for d in digitos_finais))
-
+        leitura = int("".join(str(d) for d in digitos))
         return {
-            "digitos": digitos_finais,
+            "digitos": digitos,
             "angulos": angulos,
             "leitura_kwh": leitura,
             "infos": infos
         }
 
     except Exception as e:
-        return {"erro": f"Erro interno no servidor: {str(e)}"}
+        return {"erro": f"Erro interno: {str(e)}"}
