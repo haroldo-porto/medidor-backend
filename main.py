@@ -1,14 +1,19 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import cv2
 import numpy as np
 import base64
-import io
-from leitor import ler_medidor, recortar_dials, preprocessar
+import json
+import os
+from leitor import (
+    ler_dial_individual,
+    recortar_dials,
+    preprocessar
+)
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,24 +22,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+LEITURAS_FILE = "leituras.json"
+
+
+def carregar_leituras():
+    if not os.path.exists(LEITURAS_FILE):
+        return []
+    try:
+        with open(LEITURAS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def salvar_leituras(leituras):
+    try:
+        with open(LEITURAS_FILE, "w") as f:
+            json.dump(leituras, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar: {str(e)}")
+
+
+class LeituraRequest(BaseModel):
+    leitura_kwh: int
+
 
 # ─────────────────────────────────────────────
-# ENDPOINT 1: PROCESSAR FOTO (dividir em 4 dials)
+# HEALTH CHECK
+# ─────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Medidor backend rodando"}
+
+
+# ─────────────────────────────────────────────
+# ENDPOINT 1: PROCESSAR FOTO
+# Divide em 4 dials, aplica P&B, retorna base64
 # ─────────────────────────────────────────────
 @app.post("/processar-dials")
 async def processar_dials(file: UploadFile = File(...)):
-    """
-    Recebe a foto inteira do medidor.
-    Retorna os 4 dials processados em P&B como base64.
-    """
     try:
-        # Lê o arquivo
         contents = await file.read()
         arr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
         if img is None:
-            raise HTTPException(status_code=400, detail="Imagem inválida")
+            raise HTTPException(status_code=400, detail="Imagem inválida ou corrompida.")
 
         # Redimensiona se muito grande
         h, w = img.shape[:2]
@@ -42,7 +75,7 @@ async def processar_dials(file: UploadFile = File(...)):
             scale = 1400 / w
             img = cv2.resize(img, (1400, int(h * scale)))
 
-        # Pré-processa
+        # Pré-processa imagem geral
         gray, binary = preprocessar(img)
 
         # Recorta os 4 dials
@@ -51,75 +84,147 @@ async def processar_dials(file: UploadFile = File(...)):
         if len(dials) < 4:
             raise HTTPException(
                 status_code=400,
-                detail="Não encontrei 4 dials. Tente foto mais próxima."
+                detail="Não encontrei 4 dials. Tente foto mais próxima e centralizada."
             )
 
-        # Converte cada dial para P&B e depois para base64
+        # Processa cada dial em P&B e converte para base64
         dials_base64 = []
         for dial_img in dials:
-            # Pré-processa o dial individual
+            # Converte para escala de cinza
             dial_gray = cv2.cvtColor(dial_img, cv2.COLOR_BGR2GRAY)
+
+            # Remove reflexo preservando bordas
             dial_gray = cv2.bilateralFilter(dial_gray, 9, 75, 75)
+
+            # Aumenta contraste local
             clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
             dial_gray = clahe.apply(dial_gray)
+
+            # Binariza (preto e branco)
             dial_binary = cv2.adaptiveThreshold(
                 dial_gray, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY_INV,
-                blockSize=21, C=8
+                blockSize=21,
+                C=8
             )
 
-            # Converte para PNG e depois base64
-            _, buf = cv2.imencode('.png', dial_binary)
-            dial_base64 = base64.b64encode(buf).decode('utf-8')
-            dials_base64.append(dial_base64)
+            # Remove ruído
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+            dial_binary = cv2.morphologyEx(dial_binary, cv2.MORPH_OPEN, kernel)
 
-        return {"dials": dials_base64}
+            # Converte para PNG base64
+            _, buf = cv2.imencode('.png', dial_binary)
+            dial_b64 = base64.b64encode(buf).decode('utf-8')
+            dials_base64.append(dial_b64)
+
+        return {
+            "dials": dials_base64,
+            "total": len(dials_base64)
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao processar: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
 # ─────────────────────────────────────────────
-# ENDPOINT 2: LER DÍGITOS (cada dial separadamente)
+# ENDPOINT 2: LER DÍGITOS
+# Recebe os 4 dials em base64, lê cada um
 # ─────────────────────────────────────────────
 @app.post("/ler-dials")
 async def ler_dials(
-    dial0: UploadFile = File(...),
-    dial1: UploadFile = File(...),
-    dial2: UploadFile = File(...),
-    dial3: UploadFile = File(...),
+    dial0: str = Form(...),
+    dial1: str = Form(...),
+    dial2: str = Form(...),
+    dial3: str = Form(...),
 ):
-    """
-    Recebe os 4 dials já processados em P&B.
-    Retorna os 4 dígitos lidos.
-    """
     try:
-        dials_files = [dial0, dial1, dial2, dial3]
-        dials_bytes = []
+        dials_b64 = [dial0, dial1, dial2, dial3]
+        orientacoes = ["anticlockwise", "clockwise", "anticlockwise", "clockwise"]
 
-        # Lê cada dial
-        for dial_file in dials_files:
-            contents = await dial_file.read()
-            dials_bytes.append(contents)
+        digitos = []
+        angulos = []
+        infos = []
 
-        # Monta uma imagem "fake" com os 4 dials lado a lado
-        # para passar para a função ler_medidor
-        dials_imgs = []
-        for dial_bytes in dials_bytes:
-            arr = np.frombuffer(dial_bytes, np.uint8)
-            dial_img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-            if dial_img is None:
-                raise HTTPException(status_code=400, detail="Dial inválido")
-            dials_imgs.append(dial_img)
+        for i, (dial_b64, orientacao) in enumerate(zip(dials_b64, orientacoes)):
+            try:
+                # Decodifica base64 para imagem
+                dial_bytes = base64.b64decode(dial_b64)
+                arr = np.frombuffer(dial_bytes, np.uint8)
+                dial_img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
 
-        # Cria uma imagem "fake" concatenando os 4 dials
-        # (só para passar pela função ler_medidor)
-        h = dials_imgs[0].shape[0]
-        w = dials_imgs[0].shape[1]
-        fake_img = np.hstack(dials_imgs)
+                if dial_img is None:
+                    digitos.append(None)
+                    angulos.append(None)
+                    infos.append(f"dial {i+1}: imagem inválida")
+                    continue
 
-        # Converte de volta para BGR para passar para ler_medidor
+                # Lê o dígito do dial individual
+                resultado = ler_dial_individual(dial_img, orientacao, i)
+                digitos.append(resultado.get("digito"))
+                angulos.append(resultado.get("angulo"))
+                infos.append(resultado.get("info", f"dial {i+1}: ok"))
 
+            except Exception as e:
+                digitos.append(None)
+                angulos.append(None)
+                infos.append(f"dial {i+1}: erro - {str(e)}")
+
+        # Verifica se leu tudo
+        if any(d is None for d in digitos):
+            return {
+                "digitos": digitos,
+                "angulos": angulos,
+                "infos": infos,
+                "erro": "Não foi possível ler todos os dials. Verifique a foto."
+            }
+
+        leitura = int("".join(str(d) for d in digitos))
+
+        return {
+            "digitos": digitos,
+            "angulos": angulos,
+            "leitura_kwh": leitura,
+            "infos": infos
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# ENDPOINT 3: SALVAR LEITURA
+# ─────────────────────────────────────────────
+@app.post("/salvar-leitura")
+async def salvar_leitura(req: LeituraRequest):
+    try:
+        from datetime import datetime
+        leituras = carregar_leituras()
+
+        nova = {
+            "data": datetime.now().strftime("%Y-%m-%d"),
+            "hora": datetime.now().strftime("%H:%M"),
+            "leitura_kwh": req.leitura_kwh
+        }
+
+        leituras.append(nova)
+        salvar_leituras(leituras)
+
+        return {"sucesso": True, "leitura": nova}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# ENDPOINT 4: HISTÓRICO
+# ─────────────────────────────────────────────
+@app.get("/historico")
+def historico():
+    try:
+        leituras = carregar_leituras()
+        return {"leituras": leituras}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
