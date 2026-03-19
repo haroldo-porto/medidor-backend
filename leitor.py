@@ -65,49 +65,166 @@ def preprocessar(img):
 # RECORTAR OS 4 DIALS
 # ─────────────────────────────────────────────
 def recortar_dials(img, gray):
+    """
+    Tenta localizar 4 dials circulares alinhados horizontalmente.
+    Usa HoughCircles + filtros geométricos + análise de conteúdo.
+    Se falhar, cai no fallback de 4 faixas verticais.
+    """
     try:
-        h, w  = img.shape[:2]
-        blur  = cv2.GaussianBlur(gray, (9, 9), 2)
+        h, w = img.shape[:2]
+
+        # 1) Suaviza para facilitar Hough
+        blur = cv2.GaussianBlur(gray, (9, 9), 2)
+
         min_r = int(min(w, h) * 0.07)
         max_r = int(min(w, h) * 0.30)
 
         circles = cv2.HoughCircles(
             blur,
             cv2.HOUGH_GRADIENT,
-            dp=1.0,
-            minDist=int(min(w, h) * 0.14),
-            param1=50,
-            param2=28,
+            dp=1.2,
+            minDist=int(min(w, h) * 0.12),
+            param1=80,
+            param2=25,
             minRadius=min_r,
             maxRadius=max_r
         )
 
+        candidatos = []
+        if circles is not None:
+            circles = np.round(circles[0]).astype(int)
+
+            # 2) Pré‑ordena por X (esquerda → direita)
+            circles = sorted(circles, key=lambda c: c[0])
+
+            # 3) Filtra por “qualidade de dial”
+            for (cx, cy, r) in circles:
+                if r < min_r or r > max_r:
+                    continue
+
+                # corta uma janela em torno do círculo
+                pad = int(r * 1.25)
+                x1 = max(cx - pad, 0)
+                y1 = max(cy - pad, 0)
+                x2 = min(cx + pad, w)
+                y2 = min(cy + pad, h)
+
+                recorte_gray = gray[y1:y2, x1:x2]
+                if recorte_gray.size == 0:
+                    continue
+
+                # normaliza tamanho para análise
+                rec_norm = cv2.resize(recorte_gray, (120, 120))
+
+                # binariza para destacar bordas e dígitos
+                _, rec_bin = cv2.threshold(
+                    rec_norm, 0, 255,
+                    cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                )
+
+                # --- métrica 1: razão entre borda circular e área total ---
+                edges = cv2.Canny(rec_norm, 50, 150)
+                # máscara circular aproximada
+                mask = np.zeros_like(edges)
+                cv2.circle(mask, (60, 60), 50, 255, 2)
+                borda_circ = cv2.bitwise_and(edges, mask)
+                score_borda = cv2.countNonZero(borda_circ) / (math.pi * 50 * 2 + 1)
+
+                # --- métrica 2: quantidade de componentes pequenos (dígitos) ---
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+                    rec_bin, connectivity=8
+                )
+                # descarta fundo (label 0) e componentes mto pequenos
+                pequenos = 0
+                for i in range(1, num_labels):
+                    area = stats[i, cv2.CC_STAT_AREA]
+                    if 15 < area < 300:  # área típica de pedaços de números
+                        pequenos += 1
+
+                # --- métrica 3: “poluição textual” (linhas longas) ---
+                # se houver muitas linhas horizontais/verticais longas, provavelmente é palavra “GENERAL”
+                linhas = cv2.HoughLinesP(
+                    edges,
+                    1,
+                    np.pi / 180,
+                    threshold=40,
+                    minLineLength=40,
+                    maxLineGap=5
+                )
+                linhas_longas = 0
+                if linhas is not None:
+                    for x1_l, y1_l, x2_l, y2_l in linhas[:, 0]:
+                        comprimento = math.hypot(x2_l - x1_l, y2_l - y1_l)
+                        if comprimento > 60:
+                            linhas_longas += 1
+
+                # monta um score agregado:
+                #  - queremos borda circular forte
+                #  - queremos vários componentes pequenos (dígitos)
+                #  - penalizamos muitas linhas longas (texto/gráfico)
+                score = (score_borda * 1.5) + (pequenos * 0.8) - (linhas_longas * 1.2)
+
+                candidatos.append({
+                    "cx": cx,
+                    "cy": cy,
+                    "r": r,
+                    "score": score
+                })
+
+        # 4) escolhe os 4 melhores candidatos, tentando manter alinhamento horizontal
         dials   = []
         centros = []
 
-        if circles is not None:
-            circles   = np.round(circles[0]).astype(int)
-            circles   = sorted(circles, key=lambda c: c[0])
-            filtrados = [circles[0]]
+        if candidatos:
+            # ordena primeiro por score (decrescente), depois por X
+            candidatos = sorted(
+                candidatos,
+                key=lambda c: (-c["score"], c["cx"])
+            )
 
-            for c in circles[1:]:
-                if abs(c[0] - filtrados[-1][0]) > min_r * 1.5:
-                    filtrados.append(c)
-                if len(filtrados) == 4:
-                    break
+            # pega os top 8, ordena por X e tenta formar 4 mais alinhados
+            top = candidatos[:8]
+            top = sorted(top, key=lambda c: c["cx"])
 
-            if len(filtrados) == 4:
-                for cx, cy, r in filtrados:
+            # média de Y para alinhamento
+            ys = [c["cy"] for c in top]
+            y_med = sum(ys) / len(ys)
+
+            # reordena privilegiando proximidade da linha média
+            top = sorted(top, key=lambda c: abs(c["cy"] - y_med))
+
+            # escolhe 4 mais alinhados (primeiros após esse sort)
+            escolhidos = sorted(top[:4], key=lambda c: c["cx"])
+
+            if len(escolhidos) == 4:
+                for c in escolhidos:
+                    cx, cy, r = c["cx"], c["cy"], c["r"]
                     pad = int(r * 1.25)
-                    x1  = max(cx - pad, 0)
-                    y1  = max(cy - pad, 0)
-                    x2  = min(cx + pad, w)
-                    y2  = min(cy + pad, h)
+                    x1 = max(cx - pad, 0)
+                    y1 = max(cy - pad, 0)
+                    x2 = min(cx + pad, w)
+                    y2 = min(cy + pad, h)
                     dials.append(img[y1:y2, x1:x2])
                     centros.append((cx, cy, r))
-                return dials, centros
 
-        # Fallback: divide em 4 faixas iguais
+        # 5) se ainda não temos 4 dials, cai no fallback antigo (4 faixas)
+        if len(dials) < 4:
+            dials   = []
+            centros = []
+            dw = w // 4
+            for i in range(4):
+                x1 = i * dw
+                x2 = (i + 1) * dw if i < 3 else w
+                dials.append(img[0:h, x1:x2])
+                centros.append(((x1 + x2) // 2, h // 2, min(dw, h) // 2))
+
+        return dials, centros
+
+    except Exception:
+        # fallback total em caso de erro
+        h, w = img.shape[:2]
+        dials   = []
+        centros = []
         dw = w // 4
         for i in range(4):
             x1 = i * dw
@@ -115,19 +232,6 @@ def recortar_dials(img, gray):
             dials.append(img[0:h, x1:x2])
             centros.append(((x1 + x2) // 2, h // 2, min(dw, h) // 2))
         return dials, centros
-
-    except Exception:
-        h, w = img.shape[:2]
-        dw   = w // 4
-        dials   = []
-        centros = []
-        for i in range(4):
-            x1 = i * dw
-            x2 = (i + 1) * dw if i < 3 else w
-            dials.append(img[0:h, x1:x2])
-            centros.append(((x1 + x2) // 2, h // 2, min(dw, h) // 2))
-        return dials, centros
-
 
 # ─────────────────────────────────────────────
 # GOOGLE VISION: detectar números no dial
