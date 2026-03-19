@@ -10,7 +10,6 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 VISION_URL     = "https://vision.googleapis.com/v1/images:annotate?key=" + GOOGLE_API_KEY
 ORIENTACOES    = ["anticlockwise", "clockwise", "anticlockwise", "clockwise"]
 
-
 def preprocessar(img):
     try:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
