@@ -42,9 +42,6 @@ class LeituraRequest(BaseModel):
     leitura_kwh: int
 
 
-# ─────────────────────────────────────────────
-# HEALTH CHECK
-# ─────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Medidor backend rodando"}
@@ -52,7 +49,7 @@ def root():
 
 # ─────────────────────────────────────────────
 # ENDPOINT 1: PROCESSAR FOTO
-# Divide em 4 dials, aplica cinza suave, retorna base64
+# Cinza suave — igual à foto de referência
 # ─────────────────────────────────────────────
 @app.post("/processar-dials")
 async def processar_dials(file: UploadFile = File(...)):
@@ -62,10 +59,7 @@ async def processar_dials(file: UploadFile = File(...)):
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
         if img is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Imagem inválida ou corrompida."
-            )
+            raise HTTPException(status_code=400, detail="Imagem inválida.")
 
         # Redimensiona se muito grande
         h, w = img.shape[:2]
@@ -73,7 +67,7 @@ async def processar_dials(file: UploadFile = File(...)):
             scale = 1400 / w
             img = cv2.resize(img, (1400, int(h * scale)))
 
-        # Pré-processa para detecção de círculos
+        # Pré-processa só para detecção interna (não afeta visual)
         gray, _ = preprocessar(img)
 
         # Recorta os 4 dials
@@ -82,30 +76,36 @@ async def processar_dials(file: UploadFile = File(...)):
         if len(dials) < 4:
             raise HTTPException(
                 status_code=400,
-                detail="Não encontrei 4 dials. Tente foto mais próxima e centralizada."
+                detail="Não encontrei 4 dials. Tente foto mais próxima."
             )
 
         dials_base64 = []
         for dial_img in dials:
             try:
-                # ── PIPELINE DE COR SUAVE (como na foto de referência) ──
+                # ── PIPELINE VISUAL SUAVE ──
+                # NÃO usa threshold binário — mantém tons de cinza
+                # para que ponteiro e números fiquem visíveis
 
                 # 1) Converte para cinza
                 dial_gray = cv2.cvtColor(dial_img, cv2.COLOR_BGR2GRAY)
 
-                # 2) CLAHE suave para realçar contraste local sem estourar
+                # 2) CLAHE suave: melhora contraste local sem estourar
                 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
                 dial_gray = clahe.apply(dial_gray)
 
-                # 3) Ajuste de brilho/contraste global
-                #    alpha=1.2 = leve aumento de contraste
-                #    beta=-10  = levemente mais escuro (fundo fica cinza escuro)
-                dial_adj = cv2.convertScaleAbs(dial_gray, alpha=1.2, beta=-10)
+                # 3) Ajuste de brilho/contraste
+                #    alpha=1.3 -> contraste ligeiramente aumentado
+                #    beta=-15  -> fundo cinza escuro (não preto absoluto)
+                dial_adj = cv2.convertScaleAbs(dial_gray, alpha=1.3, beta=-15)
 
-                # 4) Suaviza ruído levemente (mantém bordas dos números)
+                # 4) Suavização leve para remover grão
                 dial_adj = cv2.GaussianBlur(dial_adj, (3, 3), 0)
 
-                # Codifica em PNG em tons de cinza suave
+                # 5) Normaliza para 200x200 px
+                #    (todos os dials com mesmo tamanho na tela)
+                dial_adj = cv2.resize(dial_adj, (200, 200))
+
+                # Codifica em PNG — sem binarizar, cinza suave
                 _, buf = cv2.imencode('.png', dial_adj)
                 dials_base64.append(base64.b64encode(buf).decode('utf-8'))
 
@@ -125,7 +125,6 @@ async def processar_dials(file: UploadFile = File(...)):
 
 # ─────────────────────────────────────────────
 # ENDPOINT 2: LER DÍGITOS
-# Recebe os 4 dials em base64, lê cada um
 # ─────────────────────────────────────────────
 @app.post("/ler-dials")
 async def ler_dials(
@@ -145,6 +144,7 @@ async def ler_dials(
             try:
                 dial_bytes = base64.b64decode(b64)
                 arr        = np.frombuffer(dial_bytes, np.uint8)
+                # lê em cinza — o pipeline visual já está em cinza
                 dial_img   = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
 
                 if dial_img is None:
