@@ -611,5 +611,5 @@ def ler_medidor(img_bytes):
             "infos":       infos
         }
 
-    except Exception as e:
+    eexcept Exception as e:
         return {"erro": f"Erro interno: {str(e)}"}
