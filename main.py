@@ -1,10 +1,10 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import anthropic
 import base64
 import json
 import os
+import re
 from datetime import datetime
 
 app = FastAPI()
@@ -17,7 +17,6 @@ app.add_middleware(
 )
 
 LEITURAS_FILE = "leituras.json"
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 def carregar_leituras():
     if not os.path.exists(LEITURAS_FILE):
@@ -37,11 +36,27 @@ class LeituraRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok"}
+    chave = os.environ.get("ANTHROPIC_API_KEY", "")
+    return {
+        "status": "ok",
+        "chave_configurada": bool(chave),
+        "chave_prefixo": chave[:10] if chave else "VAZIA"
+    }
 
 @app.post("/ler-medidor")
 async def ler_medidor(file: UploadFile = File(...)):
     try:
+        import anthropic
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="ANTHROPIC_API_KEY não configurada no servidor."
+            )
+
+        client = anthropic.Anthropic(api_key=api_key)
+
         contents = await file.read()
         b64 = base64.standard_b64encode(contents).decode("utf-8")
         media_type = file.content_type or "image/jpeg"
@@ -77,7 +92,6 @@ async def ler_medidor(file: UploadFile = File(...)):
         )
 
         texto = message.content[0].text.strip()
-        import re
         match = re.search(r'\{.*\}', texto, re.DOTALL)
         if not match:
             raise HTTPException(status_code=500, detail=f"IA não retornou JSON: {texto}")
