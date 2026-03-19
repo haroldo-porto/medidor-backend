@@ -62,7 +62,7 @@ def recortar_dials(img, gray):
 
         circles = np.round(circles[0]).astype(int)
 
-        # ── PASSO 1: filtra pela faixa vertical dos dials ──
+        # Filtra pela faixa vertical dos dials
         ys    = [c[1] for c in circles]
         y_med = float(np.median(ys))
         y_tol = int(h * 0.20)
@@ -78,7 +78,7 @@ def recortar_dials(img, gray):
         if r_med <= 0:
             r_med = min_r
 
-        # ── PASSO 2: agrupa em 4 colunas por X ──
+        # Agrupa em 4 colunas por X
         colunas = []
         for c in circles:
             cx = c[0]
@@ -108,7 +108,7 @@ def recortar_dials(img, gray):
         if len(colunas) < 4:
             raise ValueError("Menos de 4 colunas")
 
-        # ── PASSO 3: escolhe 1 círculo por coluna ──
+        # Escolhe 1 círculo por coluna (mais central em Y)
         escolhidos = []
         for coluna in colunas:
             ys_c   = [c[1] for c in coluna]
@@ -118,18 +118,12 @@ def recortar_dials(img, gray):
 
         escolhidos = sorted(escolhidos, key=lambda c: c[0])
 
-        # ── PASSO 4: CORRIGIR INCLINAÇÃO DA FOTO ──
-        # Calcula o ângulo da reta que passa pelos 4 centros
-        # Se a linha não estiver horizontal, rotaciona a imagem inteira
+        # ── CORREÇÃO DE INCLINAÇÃO ──
         xs_e = np.array([float(c[0]) for c in escolhidos])
         ys_e = np.array([float(c[1]) for c in escolhidos])
+        coef = np.polyfit(xs_e, ys_e, 1)
+        angle_deg = math.degrees(math.atan2(coef[0], 1.0))
 
-        # regressão linear para achar inclinação
-        coef = np.polyfit(xs_e, ys_e, 1)  # coef[0]=m, coef[1]=b
-        angle_rad = math.atan2(coef[0], 1.0)
-        angle_deg = math.degrees(angle_rad)
-
-        # só rotaciona se a inclinação for significativa (> 0.5°)
         img_work  = img
         gray_work = gray
 
@@ -142,8 +136,6 @@ def recortar_dials(img, gray):
             gray_work = cv2.warpAffine(gray, M, (w, h),
                                        flags=cv2.INTER_LINEAR,
                                        borderMode=cv2.BORDER_REFLECT)
-
-            # recalcula os centros dos círculos na imagem rotacionada
             pts = np.array([[c[0], c[1]] for c in escolhidos],
                            dtype=np.float32).reshape(-1, 1, 2)
             pts_rot = cv2.transform(pts, M)
@@ -152,12 +144,11 @@ def recortar_dials(img, gray):
                 for i in range(4)
             ]
 
-        # ── PASSO 5: recorte refinado com detecção do anel ──
+        # Recorte refinado com detecção do anel
         dials   = []
         centros = []
 
         for cx, cy, r in escolhidos:
-            # janela maior para ter margem
             pad  = int(r * 1.8)
             x1_i = max(cx - pad, 0)
             x2_i = min(cx + pad, w)
@@ -169,7 +160,6 @@ def recortar_dials(img, gray):
             cx_r     = rw // 2
             cy_r     = rh // 2
 
-            # busca o raio com mais borda (anel dos números)
             edges    = cv2.Canny(roi_gray, 50, 150)
             r_min    = int(r * 0.5)
             r_max    = int(r * 1.1)
@@ -184,7 +174,6 @@ def recortar_dials(img, gray):
                     melhor_v = val
                     melhor_r = rr
 
-            # recorte final centrado no anel
             half = int(melhor_r * 1.6)
             x1   = max(cx - half, 0)
             x2   = min(cx + half, w)
@@ -192,10 +181,7 @@ def recortar_dials(img, gray):
             y2   = min(cy + half, h)
 
             crop = img_work[y1:y2, x1:x2]
-
-            # normaliza para 200x200 — todos iguais
             crop = cv2.resize(crop, (200, 200))
-
             dials.append(crop)
             centros.append((cx, cy, melhor_r))
 
@@ -205,7 +191,6 @@ def recortar_dials(img, gray):
         return dials, centros
 
     except Exception:
-        # Fallback: 4 faixas verticais
         h, w    = img.shape[:2]
         dials   = []
         centros = []
@@ -221,7 +206,7 @@ def recortar_dials(img, gray):
 
 
 # ─────────────────────────────────────────────
-# GOOGLE VISION
+# GOOGLE VISION — só dígitos únicos (0-9)
 # ─────────────────────────────────────────────
 def detectar_numeros_no_dial(dial_gray):
     if not GOOGLE_API_KEY:
@@ -242,35 +227,74 @@ def detectar_numeros_no_dial(dial_gray):
         if not anots:
             return []
 
+        h, w = dial_gray.shape[:2]
+        cx   = w // 2
+        cy   = h // 2
+        r    = min(w, h) // 2
+
         numeros = []
+        vistos  = set()
+
         for item in anots[1:]:
             texto = item.get("description", "").strip()
+
+            # aceita SOMENTE dígito único 0-9
             if not re.match(r'^\d$', texto):
                 continue
+
             verts = item.get("boundingPoly", {}).get("vertices", [])
             if not verts:
                 continue
-            xs = [v.get("x", 0) for v in verts]
-            ys = [v.get("y", 0) for v in verts]
-            numeros.append((int(texto), sum(xs) // len(xs), sum(ys) // len(ys)))
+
+            xs  = [v.get("x", 0) for v in verts]
+            ys  = [v.get("y", 0) for v in verts]
+            px  = sum(xs) // len(xs)
+            py  = sum(ys) // len(ys)
+
+            # descarta detecções no centro (região do ponteiro, não de números)
+            dist_centro = math.hypot(px - cx, py - cy)
+            if dist_centro < r * 0.25:
+                continue
+
+            # descarta detecções fora do círculo do dial
+            if dist_centro > r * 1.05:
+                continue
+
+            d = int(texto)
+
+            # evita duplicatas do mesmo dígito muito próximas
+            duplicata = False
+            for (dd, ppx, ppy) in numeros:
+                if dd == d and math.hypot(px - ppx, py - ppy) < r * 0.15:
+                    duplicata = True
+                    break
+            if duplicata:
+                continue
+
+            numeros.append((d, px, py))
+
         return numeros
+
     except Exception:
         return []
 
 
+# ─────────────────────────────────────────────
+# CONVERTE PIXEL → ÂNGULO (0° = topo, sentido horário)
+# ─────────────────────────────────────────────
 def pixel_para_angulo(px, py, cx, cy):
     return math.degrees(math.atan2(px - cx, cy - py)) % 360
 
 
 # ─────────────────────────────────────────────
-# DETECTAR PONTEIRO VIA HOUGH LINES
+# DETECTAR PONTEIRO — HoughLinesP
 # ─────────────────────────────────────────────
 def detectar_por_linhas(binary, cx, cy, r):
     try:
         lines = cv2.HoughLinesP(
             binary, 1, np.pi / 360,
             threshold=10,
-            minLineLength=int(r * 0.32),
+            minLineLength=int(r * 0.30),
             maxLineGap=8
         )
         if lines is None:
@@ -301,34 +325,34 @@ def detectar_por_linhas(binary, cx, cy, r):
 
 
 # ─────────────────────────────────────────────
-# DETECTAR PONTEIRO POR FATIAS
+# DETECTAR PONTEIRO — varredura por fatias
 # ─────────────────────────────────────────────
 def detectar_por_fatias(binary, cx, cy, r):
     try:
         h, w      = binary.shape[:2]
         contagens = []
-        for ang_deg in range(0, 360, 5):
+        for ang_deg in range(0, 360, 3):
             ar  = math.radians(ang_deg)
             msk = np.zeros((h, w), dtype=np.uint8)
             p1  = (cx, cy)
             p2  = (
-                int(cx + r * 0.88 * math.sin(ar - math.radians(6))),
-                int(cy - r * 0.88 * math.cos(ar - math.radians(6)))
+                int(cx + r * 0.88 * math.sin(ar - math.radians(5))),
+                int(cy - r * 0.88 * math.cos(ar - math.radians(5)))
             )
             p3  = (
-                int(cx + r * 0.88 * math.sin(ar + math.radians(6))),
-                int(cy - r * 0.88 * math.cos(ar + math.radians(6)))
+                int(cx + r * 0.88 * math.sin(ar + math.radians(5))),
+                int(cy - r * 0.88 * math.cos(ar + math.radians(5)))
             )
             cv2.fillPoly(msk, [np.array([p1, p2, p3])], 255)
             contagens.append(cv2.countNonZero(cv2.bitwise_and(binary, msk)))
-        return float(int(np.argmax(contagens)) * 5)
+        return float(int(np.argmax(contagens)) * 3)
     except Exception:
         return None
 
 
 # ─────────────────────────────────────────────
 # DETECTAR ÂNGULO DO PONTEIRO
-# Usa binário interno — imagem exibida continua cinza suave
+# Usa binário INTERNO — visual continua cinza suave
 # ─────────────────────────────────────────────
 def detectar_angulo_ponteiro(dial_gray):
     try:
@@ -336,6 +360,8 @@ def detectar_angulo_ponteiro(dial_gray):
         cx, cy = w // 2, h // 2
         r      = min(w, h) // 2
 
+        # máscara: só analisa o anel entre 14% e 82% do raio
+        # (centro = eixo do ponteiro; borda externa = números)
         mask = np.zeros((h, w), dtype=np.uint8)
         cv2.circle(mask, (cx, cy), int(r * 0.82), 255, -1)
         cv2.circle(mask, (cx, cy), int(r * 0.14),   0, -1)
@@ -349,61 +375,102 @@ def detectar_angulo_ponteiro(dial_gray):
         )
         binary = cv2.bitwise_and(binary, mask)
 
+        # tenta HoughLines primeiro (mais preciso)
         ang = detectar_por_linhas(binary, cx, cy, r)
         if ang is not None:
             return ang
+
+        # fallback: varredura de fatias
         return detectar_por_fatias(binary, cx, cy, r)
     except Exception:
         return None
 
 
 # ─────────────────────────────────────────────
-# DEDUZIR NÚMERO FALTANTE
+# REGRA PRINCIPAL DE LEITURA DO DÍGITO
+#
+# Regra exata conforme o medidor:
+#   "o dígito é o número imediatamente ANTES do ponteiro,
+#    no sentido de rotação do dial.
+#    Só usa o PRÓXIMO se o ponteiro estiver colado nele (< 5°)"
 # ─────────────────────────────────────────────
-def deduzir_numero_faltante(numeros):
-    try:
-        if len(numeros) != 9:
-            return None
-        detectados = set(d for (d, px, py) in numeros)
-        faltando   = set(range(10)) - detectados
-        return faltando.pop() if len(faltando) == 1 else None
-    except Exception:
-        return None
-
-
-# ─────────────────────────────────────────────
-# DÍGITO PELO PONTEIRO + NÚMEROS
-# ─────────────────────────────────────────────
-def digito_pelo_ponteiro_e_numeros(angulo, numeros, orientacao, cx, cy):
+def digito_pelo_ponteiro_e_numeros(angulo_ponteiro, numeros, orientacao, cx, cy):
     try:
         if not numeros:
-            return angulo_simples(angulo, orientacao)
+            # sem números detectados → fallback geométrico simples
+            return angulo_simples(angulo_ponteiro, orientacao)
 
-        num_ang = [(d, pixel_para_angulo(px, py, cx, cy)) for (d, px, py) in numeros]
+        # converte cada número (pixel) para ângulo no círculo
+        num_ang = []
+        for (d, px, py) in numeros:
+            a = pixel_para_angulo(px, py, cx, cy)
+            num_ang.append((d, a))
+
+        # ajusta o sentido de rotação
+        if orientacao == "anticlockwise":
+            # inverte tudo para trabalhar sempre no sentido horário
+            ang_pont = (360 - angulo_ponteiro) % 360
+            num_ang  = [(d, (360 - a) % 360) for (d, a) in num_ang]
+        else:
+            ang_pont = angulo_ponteiro
+
+        # ordena pelos ângulos (0..360, sentido horário)
         num_ang.sort(key=lambda x: x[1])
-        ang = (360 - angulo) % 360 if orientacao == "anticlockwise" else angulo
 
-        for d, a in num_ang:
-            diff = abs(ang - a)
-            if diff > 180:
-                diff = 360 - diff
-            if diff <= 15:
-                return d
+        n = len(num_ang)
 
-        for i in range(len(num_ang)):
-            d_cur,  a_cur  = num_ang[i]
-            d_next, a_next = num_ang[(i + 1) % len(num_ang)]
-            if a_cur <= ang < a_next:
-                return d_cur
-            if a_cur > a_next and (ang >= a_cur or ang < a_next):
-                return d_cur
+        # percorre todos os pares de números consecutivos
+        # e acha entre quais o ponteiro está
+        for i in range(n):
+            d_antes, a_antes = num_ang[i]
+            d_depois, a_depois = num_ang[(i + 1) % n]
 
-        return min(num_ang,
-                   key=lambda x: min(abs(ang - x[1]), 360 - abs(ang - x[1])))[0]
-    except Exception:
-        return angulo_simples(angulo, orientacao)
+            # intervalo pode cruzar o 0°/360°
+            if a_antes <= a_depois:
+                # intervalo normal [a_antes, a_depois)
+                no_intervalo = a_antes <= ang_pont < a_depois
+            else:
+                # intervalo cruza 360°
+                no_intervalo = ang_pont >= a_antes or ang_pont < a_depois
+
+            if no_intervalo:
+                # quantos graus falta para chegar no próximo número?
+                if a_antes <= a_depois:
+                    falta_para_proximo = a_depois - ang_pont
+                else:
+                    if ang_pont >= a_antes:
+                        falta_para_proximo = (360 - ang_pont) + a_depois
+                    else:
+                        falta_para_proximo = a_depois - ang_pont
+
+                # REGRA: devolve o número ANTERIOR
+                # exceto se o ponteiro estiver praticamente em cima do próximo
+                if falta_para_proximo < 5:
+                    print(f"  → ponteiro colado no próximo: {d_depois} "
+                          f"(falta {falta_para_proximo:.1f}°)")
+                    return d_depois
+                else:
+                    print(f"  → entre {d_antes} e {d_depois}, "
+                          f"falta {falta_para_proximo:.1f}° → dígito={d_antes}")
+                    return d_antes
+
+        # fallback: número cujo ângulo está mais próximo do ponteiro
+        mais_proximo = min(
+            num_ang,
+            key=lambda x: min(abs(ang_pont - x[1]), 360 - abs(ang_pont - x[1]))
+        )
+        print(f"  → fallback mais próximo: {mais_proximo[0]}")
+        return mais_proximo[0]
+
+    except Exception as e:
+        print(f"  → exceção em digito_pelo_ponteiro: {e}")
+        return angulo_simples(angulo_ponteiro, orientacao)
 
 
+# ─────────────────────────────────────────────
+# FALLBACK GEOMÉTRICO SIMPLES
+# Só usado quando Vision não detectou nenhum número
+# ─────────────────────────────────────────────
 def angulo_simples(angle, orientation):
     try:
         if orientation == "anticlockwise":
@@ -422,32 +489,41 @@ def ler_dial_individual(dial_gray, orientacao, indice):
         cx, cy = w // 2, h // 2
         r      = min(w, h) // 2
 
+        # 1) Detecta ângulo do ponteiro
         angulo = detectar_angulo_ponteiro(dial_gray)
+
+        print(f"\n[dial {indice+1}] orientacao={orientacao}")
+        print(f"  angulo ponteiro = {angulo}")
+
         if angulo is None:
+            print(f"  ERRO: ponteiro não detectado")
             return {
                 "digito": None,
                 "angulo": None,
                 "info":   f"dial {indice+1}: ponteiro não detectado"
             }
 
-        numeros  = detectar_numeros_no_dial(dial_gray)
-        info     = f"dial {indice+1}: {len(numeros)} núm, ang={round(angulo,1)}°"
+        # 2) Detecta números via Google Vision
+        numeros = detectar_numeros_no_dial(dial_gray)
+        print(f"  numeros detectados = {numeros}")
 
-        faltando = deduzir_numero_faltante(numeros)
-        if faltando is not None:
-            dx = int(cx + r * 0.38 * math.sin(math.radians(angulo)))
-            dy = int(cy - r * 0.38 * math.cos(math.radians(angulo)))
-            numeros.append((faltando, dx, dy))
-            info += f" | nº {faltando} deduzido"
+        info = f"dial {indice+1}: {len(numeros)} núm, ang={round(angulo,1)}°"
 
-        digito = digito_pelo_ponteiro_e_numeros(angulo, numeros, orientacao, cx, cy)
+        # 3) Dígito pela regra do ponteiro entre dois números
+        digito = digito_pelo_ponteiro_e_numeros(
+            angulo, numeros, orientacao, cx, cy
+        )
+
+        print(f"  DIGITO FINAL = {digito}")
 
         return {
             "digito": digito,
             "angulo": round(angulo, 1),
             "info":   info
         }
+
     except Exception as e:
+        print(f"  ERRO GERAL dial {indice+1}: {e}")
         return {
             "digito": None,
             "angulo": None,
@@ -456,7 +532,7 @@ def ler_dial_individual(dial_gray, orientacao, indice):
 
 
 # ─────────────────────────────────────────────
-# FUNÇÃO PRINCIPAL (compatibilidade)
+# FUNÇÃO PRINCIPAL (compatibilidade com main.py)
 # ─────────────────────────────────────────────
 def ler_medidor(img_bytes):
     try:
@@ -506,5 +582,6 @@ def ler_medidor(img_bytes):
             "leitura_kwh": leitura,
             "infos":       infos
         }
+
     except Exception as e:
         return {"erro": f"Erro interno: {str(e)}"}
