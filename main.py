@@ -17,7 +17,7 @@ app.add_middleware(
 )
 
 LEITURAS_FILE = "leituras.json"
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "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"))
 
 def carregar_leituras():
     if not os.path.exists(LEITURAS_FILE):
