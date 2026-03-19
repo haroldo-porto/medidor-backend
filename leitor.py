@@ -11,9 +11,6 @@ VISION_URL     = "https://vision.googleapis.com/v1/images:annotate?key=" + GOOGL
 ORIENTACOES    = ["anticlockwise", "clockwise", "anticlockwise", "clockwise"]
 
 
-# ─────────────────────────────────────────────
-# PRÉ-PROCESSAMENTO (só para detecção interna)
-# ─────────────────────────────────────────────
 def preprocessar(img):
     try:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -35,16 +32,12 @@ def preprocessar(img):
         return z, z
 
 
-# ─────────────────────────────────────────────
-# RECORTAR OS 4 DIALS
-# Clusteriza por coluna X, escolhe 1 por coluna
-# ─────────────────────────────────────────────
 def recortar_dials(img, gray):
     try:
-        h, w = img.shape[:2]
+        h, w  = img.shape[:2]
         blur  = cv2.GaussianBlur(gray, (9, 9), 2)
         min_r = int(min(w, h) * 0.06)
-        max_r = int(min(w, h) * 0.20)
+        max_r = int(min(w, h) * 0.22)
 
         circles = cv2.HoughCircles(
             blur,
@@ -58,29 +51,27 @@ def recortar_dials(img, gray):
         )
 
         if circles is None:
-            raise ValueError("Nenhum círculo encontrado")
+            raise ValueError("Nenhum círculo")
 
         circles = np.round(circles[0]).astype(int)
 
-        # Filtra pela faixa vertical onde ficam os dials
+        # Filtra pela faixa vertical dos dials
         ys    = [c[1] for c in circles]
         y_med = float(np.median(ys))
         y_tol = int(h * 0.20)
         circles = [c for c in circles if abs(c[1] - y_med) <= y_tol]
 
         if len(circles) < 4:
-            raise ValueError("Menos de 4 círculos na faixa horizontal")
+            raise ValueError("Menos de 4 círculos")
 
-        # Ordena por X
         circles = sorted(circles, key=lambda c: c[0])
 
-        # Raio mediano para limiar de agrupamento
         raios = [c[2] for c in circles]
         r_med = float(np.median(raios))
         if r_med <= 0:
             r_med = min_r
 
-        # Agrupa em colunas por proximidade de X
+        # Agrupa em colunas por X
         colunas = []
         for c in circles:
             cx = c[0]
@@ -94,46 +85,78 @@ def recortar_dials(img, gray):
             if not colocado:
                 colunas.append([c])
 
-        # Funde colunas mais próximas até ter 4
+        # Funde colunas até ter 4
         while len(colunas) > 4:
-            melhor_i, melhor_j, melhor_dist = 0, 1, 1e9
+            mi, mj, md = 0, 1, 1e9
             for i in range(len(colunas)):
                 for j in range(i + 1, len(colunas)):
                     cx_i = float(np.mean([c[0] for c in colunas[i]]))
                     cx_j = float(np.mean([c[0] for c in colunas[j]]))
-                    dist = abs(cx_i - cx_j)
-                    if dist < melhor_dist:
-                        melhor_dist = dist
-                        melhor_i, melhor_j = i, j
-            colunas[melhor_i].extend(colunas[melhor_j])
-            del colunas[melhor_j]
+                    d = abs(cx_i - cx_j)
+                    if d < md:
+                        md, mi, mj = d, i, j
+            colunas[mi].extend(colunas[mj])
+            del colunas[mj]
 
         if len(colunas) < 4:
             raise ValueError("Menos de 4 colunas")
 
-        # Em cada coluna escolhe 1 círculo (mais central em Y)
+        # Escolhe 1 círculo por coluna (mais central em Y)
         escolhidos = []
         for coluna in colunas:
-            ys_col  = [c[1] for c in coluna]
-            y_med_c = float(np.median(ys_col))
-            melhor  = min(coluna, key=lambda c: abs(c[1] - y_med_c))
+            ys_c   = [c[1] for c in coluna]
+            y_mc   = float(np.median(ys_c))
+            melhor = min(coluna, key=lambda c: abs(c[1] - y_mc))
             escolhidos.append(melhor)
 
-        # Ordena os 4 finais por X
         escolhidos = sorted(escolhidos, key=lambda c: c[0])
 
-        # Recorte quadrado pequeno (1 dial por imagem)
+        # Recorte refinado: busca o anel de maior borda para centralizar
         dials   = []
         centros = []
+
         for cx, cy, r in escolhidos:
-            lado = int(r * 1.4)
-            half = lado // 2
-            x1 = max(cx - half, 0)
-            x2 = min(cx + half, w)
-            y1 = max(cy - half, 0)
-            y2 = min(cy + half, h)
-            dials.append(img[y1:y2, x1:x2])
-            centros.append((cx, cy, r))
+            # Janela inicial um pouco maior para ter margem
+            pad  = int(r * 1.8)
+            x1_i = max(cx - pad, 0)
+            x2_i = min(cx + pad, w)
+            y1_i = max(cy - pad, 0)
+            y2_i = min(cy + pad, h)
+
+            roi_gray = gray[y1_i:y2_i, x1_i:x2_i]
+            rh, rw   = roi_gray.shape[:2]
+            cx_r     = rw // 2
+            cy_r     = rh // 2
+
+            # Procura raio com mais borda (anel dos números)
+            edges     = cv2.Canny(roi_gray, 50, 150)
+            r_min     = int(r * 0.5)
+            r_max     = int(r * 1.1)
+            melhor_r  = r
+            melhor_v  = -1
+
+            for rr in range(r_min, r_max, max(1, (r_max - r_min) // 12)):
+                msk = np.zeros_like(edges)
+                cv2.circle(msk, (cx_r, cy_r), rr, 255, 2)
+                val = cv2.countNonZero(cv2.bitwise_and(edges, msk))
+                if val > melhor_v:
+                    melhor_v = val
+                    melhor_r = rr
+
+            # Recorte final centrado, tamanho = 1.6 * raio do anel
+            half = int(melhor_r * 1.6)
+            x1   = max(cx - half, 0)
+            x2   = min(cx + half, w)
+            y1   = max(cy - half, 0)
+            y2   = min(cy + half, h)
+
+            crop = img[y1:y2, x1:x2]
+
+            # Normaliza para 200x200
+            crop = cv2.resize(crop, (200, 200))
+
+            dials.append(crop)
+            centros.append((cx, cy, melhor_r))
 
         if len(dials) != 4:
             raise ValueError("Não formou 4 recortes")
@@ -141,7 +164,7 @@ def recortar_dials(img, gray):
         return dials, centros
 
     except Exception:
-        # Fallback: 4 faixas verticais iguais
+        # Fallback: 4 faixas verticais
         h, w    = img.shape[:2]
         dials   = []
         centros = []
@@ -149,14 +172,13 @@ def recortar_dials(img, gray):
         for i in range(4):
             x1 = i * dw
             x2 = (i + 1) * dw if i < 3 else w
-            dials.append(img[0:h, x1:x2])
+            crop = img[0:h, x1:x2]
+            crop = cv2.resize(crop, (200, 200))
+            dials.append(crop)
             centros.append(((x1 + x2) // 2, h // 2, min(dw, h) // 2))
         return dials, centros
 
 
-# ─────────────────────────────────────────────
-# GOOGLE VISION: detectar números no dial
-# ─────────────────────────────────────────────
 def detectar_numeros_no_dial(dial_gray):
     if not GOOGLE_API_KEY:
         return []
@@ -196,10 +218,6 @@ def pixel_para_angulo(px, py, cx, cy):
     return math.degrees(math.atan2(px - cx, cy - py)) % 360
 
 
-# ─────────────────────────────────────────────
-# DETECTAR PONTEIRO VIA HOUGH LINES
-# (usa binário interno, não afeta visual)
-# ─────────────────────────────────────────────
 def detectar_por_linhas(binary, cx, cy, r):
     try:
         lines = cv2.HoughLinesP(
@@ -235,9 +253,6 @@ def detectar_por_linhas(binary, cx, cy, r):
         return None
 
 
-# ─────────────────────────────────────────────
-# DETECTAR PONTEIRO POR VARREDURA DE FATIAS
-# ─────────────────────────────────────────────
 def detectar_por_fatias(binary, cx, cy, r):
     try:
         h, w      = binary.shape[:2]
@@ -261,22 +276,17 @@ def detectar_por_fatias(binary, cx, cy, r):
         return None
 
 
-# ─────────────────────────────────────────────
-# DETECTAR ÂNGULO DO PONTEIRO
-# Usa binário INTERNO — a imagem exibida continua cinza suave
-# ─────────────────────────────────────────────
 def detectar_angulo_ponteiro(dial_gray):
     try:
         h, w   = dial_gray.shape[:2]
         cx, cy = w // 2, h // 2
         r      = min(w, h) // 2
 
-        # Máscara circular
         mask = np.zeros((h, w), dtype=np.uint8)
         cv2.circle(mask, (cx, cy), int(r * 0.82), 255, -1)
         cv2.circle(mask, (cx, cy), int(r * 0.14),   0, -1)
 
-        # Binário INTERNO para detecção (não afeta visual)
+        # Binário INTERNO somente para detectar ponteiro
         blur = cv2.GaussianBlur(dial_gray, (5, 5), 0)
         binary = cv2.adaptiveThreshold(
             blur, 255,
@@ -286,21 +296,14 @@ def detectar_angulo_ponteiro(dial_gray):
         )
         binary = cv2.bitwise_and(binary, mask)
 
-        # Tenta Hough Lines primeiro
         ang = detectar_por_linhas(binary, cx, cy, r)
         if ang is not None:
             return ang
-
-        # Fallback: varredura por fatias
         return detectar_por_fatias(binary, cx, cy, r)
-
     except Exception:
         return None
 
 
-# ─────────────────────────────────────────────
-# DEDUZIR NÚMERO FALTANTE
-# ─────────────────────────────────────────────
 def deduzir_numero_faltante(numeros):
     try:
         if len(numeros) != 9:
@@ -312,9 +315,6 @@ def deduzir_numero_faltante(numeros):
         return None
 
 
-# ─────────────────────────────────────────────
-# DÍGITO PELO PONTEIRO + NÚMEROS
-# ─────────────────────────────────────────────
 def digito_pelo_ponteiro_e_numeros(angulo, numeros, orientacao, cx, cy):
     try:
         if not numeros:
@@ -322,17 +322,14 @@ def digito_pelo_ponteiro_e_numeros(angulo, numeros, orientacao, cx, cy):
 
         num_ang = [(d, pixel_para_angulo(px, py, cx, cy)) for (d, px, py) in numeros]
         num_ang.sort(key=lambda x: x[1])
-
         ang = (360 - angulo) % 360 if orientacao == "anticlockwise" else angulo
 
-        # Exatamente em cima (±15°)
         for d, a in num_ang:
             diff = abs(ang - a)
             if diff > 180: diff = 360 - diff
             if diff <= 15:
                 return d
 
-        # Entre dois números → pega o menor (o que já passou)
         for i in range(len(num_ang)):
             d_cur,  a_cur  = num_ang[i]
             d_next, a_next = num_ang[(i + 1) % len(num_ang)]
@@ -356,16 +353,12 @@ def angulo_simples(angle, orientation):
         return 0
 
 
-# ─────────────────────────────────────────────
-# LER UM DIAL INDIVIDUAL
-# ─────────────────────────────────────────────
 def ler_dial_individual(dial_gray, orientacao, indice):
     try:
         h, w   = dial_gray.shape[:2]
         cx, cy = w // 2, h // 2
         r      = min(w, h) // 2
 
-        # 1) Detecta ângulo do ponteiro (usa binário interno)
         angulo = detectar_angulo_ponteiro(dial_gray)
         if angulo is None:
             return {
@@ -374,11 +367,9 @@ def ler_dial_individual(dial_gray, orientacao, indice):
                 "info":   f"dial {indice+1}: ponteiro não detectado"
             }
 
-        # 2) Detecta números via Google Vision
-        numeros = detectar_numeros_no_dial(dial_gray)
-        info    = f"dial {indice+1}: {len(numeros)} núm, ang={round(angulo, 1)}°"
+        numeros  = detectar_numeros_no_dial(dial_gray)
+        info     = f"dial {indice+1}: {len(numeros)} núm, ang={round(angulo,1)}°"
 
-        # 3) Número faltante (ponteiro em cima)
         faltando = deduzir_numero_faltante(numeros)
         if faltando is not None:
             dx = int(cx + r * 0.38 * math.sin(math.radians(angulo)))
@@ -386,7 +377,6 @@ def ler_dial_individual(dial_gray, orientacao, indice):
             numeros.append((faltando, dx, dy))
             info += f" | nº {faltando} deduzido"
 
-        # 4) Dígito final
         digito = digito_pelo_ponteiro_e_numeros(angulo, numeros, orientacao, cx, cy)
 
         return {
@@ -394,7 +384,6 @@ def ler_dial_individual(dial_gray, orientacao, indice):
             "angulo": round(angulo, 1),
             "info":   info
         }
-
     except Exception as e:
         return {
             "digito": None,
@@ -403,9 +392,6 @@ def ler_dial_individual(dial_gray, orientacao, indice):
         }
 
 
-# ─────────────────────────────────────────────
-# FUNÇÃO PRINCIPAL (compatibilidade)
-# ─────────────────────────────────────────────
 def ler_medidor(img_bytes):
     try:
         arr = np.frombuffer(img_bytes, np.uint8)
@@ -429,7 +415,6 @@ def ler_medidor(img_bytes):
         infos   = []
 
         for i, (dial_img, orientacao) in enumerate(zip(dials, ORIENTACOES)):
-            # Cinza suave para leitura
             dial_gray = cv2.cvtColor(dial_img, cv2.COLOR_BGR2GRAY)
             clahe     = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             dial_gray = clahe.apply(dial_gray)
@@ -455,6 +440,5 @@ def ler_medidor(img_bytes):
             "leitura_kwh": leitura,
             "infos":       infos
         }
-
     except Exception as e:
         return {"erro": f"Erro interno: {str(e)}"}
