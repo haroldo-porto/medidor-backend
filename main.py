@@ -8,7 +8,13 @@ import os
 from datetime import datetime
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 LEITURAS_FILE = "leituras.json"
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
@@ -38,22 +44,19 @@ async def ler_medidor(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         b64 = base64.standard_b64encode(contents).decode("utf-8")
-
-        # detecta tipo da imagem
         media_type = file.content_type or "image/jpeg"
 
-        prompt = """Você está vendo a foto de um medidor de energia elétrica analógico com 4 dials (mostrador de ponteiro).
+        prompt = """Você está vendo a foto de um medidor de energia elétrica analógico com 4 dials (mostradores de ponteiro).
 
 Leia cada dial da esquerda para a direita seguindo esta regra:
 - Veja entre quais dois números o ponteiro está apontando
 - Devolva SEMPRE o menor dos dois números
-- Só devolva o maior se o ponteiro estiver EXATAMENTE em cima dele
+- Só devolva o maior se o ponteiro estiver exatamente em cima dele
 
-Devolva APENAS um JSON neste formato, sem texto adicional:
-{"digitos": [D1, D2, D3, D4], "leitura": DDDD}
+Responda APENAS com um JSON neste formato exato, sem nenhum texto adicional:
+{"digitos": [X, X, X, X], "leitura_kwh": XXXX}
 
-Onde D1 é o primeiro dial (esquerda), D2 o segundo, D3 o terceiro, D4 o quarto (direita).
-DDDD é a leitura completa como número inteiro."""
+Onde cada X é um dígito de 0 a 9 lido em cada dial da esquerda para a direita."""
 
         message = client.messages.create(
             model="claude-opus-4-5",
@@ -82,22 +85,22 @@ DDDD é a leitura completa como número inteiro."""
         resposta = message.content[0].text.strip()
         print(f"Resposta IA: {resposta}")
 
-        # extrai o JSON da resposta
-        inicio = resposta.find("{")
-        fim    = resposta.rfind("}") + 1
-        dados  = json.loads(resposta[inicio:fim])
+        # limpa caso venha com ```json
+        if "```" in resposta:
+            resposta = resposta.split("```")[1]
+            if resposta.startswith("json"):
+                resposta = resposta[4:]
+        resposta = resposta.strip()
 
-        return {
-            "digitos":     dados["digitos"],
-            "leitura_kwh": dados["leitura"]
-        }
+        dados = json.loads(resposta)
+        return dados
 
     except Exception as e:
         print(f"ERRO: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao ler medidor: {str(e)}")
 
-@app.post("/salvar-leitura")
-def salvar_leitura(req: LeituraRequest):
+@app.post("/salvar")
+async def salvar(req: LeituraRequest):
     try:
         leituras = carregar_leituras()
         nova = {
@@ -117,3 +120,4 @@ def historico():
         return {"leituras": carregar_leituras()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+    
