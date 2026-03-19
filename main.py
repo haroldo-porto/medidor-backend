@@ -34,11 +34,8 @@ def carregar_leituras():
 
 
 def salvar_leituras_arquivo(leituras):
-    try:
-        with open(LEITURAS_FILE, "w") as f:
-            json.dump(leituras, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao salvar arquivo: {str(e)}")
+    with open(LEITURAS_FILE, "w") as f:
+        json.dump(leituras, f, ensure_ascii=False, indent=2)
 
 
 class LeituraRequest(BaseModel):
@@ -55,7 +52,7 @@ def root():
 
 # ─────────────────────────────────────────────
 # ENDPOINT 1: PROCESSAR FOTO
-# Divide em 4 dials, aplica P&B, retorna base64
+# Divide em 4 dials, aplica cinza suave, retorna base64
 # ─────────────────────────────────────────────
 @app.post("/processar-dials")
 async def processar_dials(file: UploadFile = File(...)):
@@ -76,7 +73,7 @@ async def processar_dials(file: UploadFile = File(...)):
             scale = 1400 / w
             img = cv2.resize(img, (1400, int(h * scale)))
 
-        # Pré-processa imagem geral
+        # Pré-processa para detecção de círculos
         gray, _ = preprocessar(img)
 
         # Recorta os 4 dials
@@ -91,31 +88,25 @@ async def processar_dials(file: UploadFile = File(...)):
         dials_base64 = []
         for dial_img in dials:
             try:
-                # Converte para escala de cinza
+                # ── PIPELINE DE COR SUAVE (como na foto de referência) ──
+
+                # 1) Converte para cinza
                 dial_gray = cv2.cvtColor(dial_img, cv2.COLOR_BGR2GRAY)
 
-                # Remove reflexo preservando bordas
-                dial_gray = cv2.bilateralFilter(dial_gray, 9, 75, 75)
-
-                # Aumenta contraste local
-                clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+                # 2) CLAHE suave para realçar contraste local sem estourar
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
                 dial_gray = clahe.apply(dial_gray)
 
-                # Binariza (preto e branco)
-                dial_bin = cv2.adaptiveThreshold(
-                    dial_gray, 255,
-                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY_INV,
-                    blockSize=21,
-                    C=8
-                )
+                # 3) Ajuste de brilho/contraste global
+                #    alpha=1.2 = leve aumento de contraste
+                #    beta=-10  = levemente mais escuro (fundo fica cinza escuro)
+                dial_adj = cv2.convertScaleAbs(dial_gray, alpha=1.2, beta=-10)
 
-                # Remove ruído
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-                dial_bin = cv2.morphologyEx(dial_bin, cv2.MORPH_OPEN, kernel)
+                # 4) Suaviza ruído levemente (mantém bordas dos números)
+                dial_adj = cv2.GaussianBlur(dial_adj, (3, 3), 0)
 
-                # Codifica para PNG base64
-                _, buf = cv2.imencode('.png', dial_bin)
+                # Codifica em PNG em tons de cinza suave
+                _, buf = cv2.imencode('.png', dial_adj)
                 dials_base64.append(base64.b64encode(buf).decode('utf-8'))
 
             except Exception as e:
@@ -152,7 +143,6 @@ async def ler_dials(
 
         for i, (b64, orientacao) in enumerate(zip(dials_b64, orientacoes)):
             try:
-                # Decodifica base64
                 dial_bytes = base64.b64decode(b64)
                 arr        = np.frombuffer(dial_bytes, np.uint8)
                 dial_img   = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
@@ -163,7 +153,6 @@ async def ler_dials(
                     infos.append(f"dial {i+1}: imagem inválida")
                     continue
 
-                # Lê o dígito do dial
                 resultado = ler_dial_individual(dial_img, orientacao, i)
                 digitos.append(resultado.get("digito"))
                 angulos.append(resultado.get("angulo"))
@@ -174,17 +163,15 @@ async def ler_dials(
                 angulos.append(None)
                 infos.append(f"dial {i+1}: erro - {str(e)}")
 
-        # Verifica se leu tudo
         if any(d is None for d in digitos):
             return {
                 "digitos": digitos,
                 "angulos": angulos,
                 "infos":   infos,
-                "erro":    "Não foi possível ler todos os dials. Corrija manualmente."
+                "erro":    "Não foi possível ler todos os dials."
             }
 
         leitura = int("".join(str(d) for d in digitos))
-
         return {
             "digitos":     digitos,
             "angulos":     angulos,
@@ -211,9 +198,6 @@ async def salvar_leitura(req: LeituraRequest):
         leituras.append(nova)
         salvar_leituras_arquivo(leituras)
         return {"sucesso": True, "leitura": nova}
-
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao salvar: {str(e)}")
 
