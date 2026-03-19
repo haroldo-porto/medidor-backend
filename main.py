@@ -43,6 +43,14 @@ def root():
         "chave_prefixo": chave[:10] if chave else "VAZIA"
     }
 
+@app.get("/status")
+def status():
+    chave = os.environ.get("ANTHROPIC_API_KEY", "")
+    return {
+        "chave_configurada": bool(chave),
+        "chave_prefixo": chave[:8] if chave else "VAZIA"
+    }
+
 @app.post("/ler-medidor")
 async def ler_medidor(file: UploadFile = File(...)):
     try:
