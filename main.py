@@ -36,7 +36,6 @@ def pre_processar_imagem(image_bytes: bytes) -> str:
     - Ponteiros pintados de vermelho
     - Imagem ampliada 4x para melhor leitura
     """
-    # Salvar bytes em arquivo temporário para abrir com PIL
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_in:
         tmp_in.write(image_bytes)
         tmp_in_path = tmp_in.name
@@ -59,16 +58,11 @@ def pre_processar_imagem(image_bytes: bytes) -> str:
         arr = np.where(gray_arr < 160, gray_arr * 0.3, gray_arr)
         arr = np.clip(arr, 0, 255).astype(np.uint8)
 
-        # 3. Base RGB para colorir ponteiros
-        rgb_arr = np.array(img_big.convert("RGB"))
-
-        # Converter para cinza processada no RGB também
-        gray_rgb = np.stack([arr, arr, arr], axis=-1)
-        rgb_arr = gray_rgb  # usa versão cinza como base
+        # 3. Base RGB cinza para colorir ponteiros
+        rgb_arr = np.stack([arr, arr, arr], axis=-1)
 
         # 4. Detectar e pintar ponteiros de vermelho dentro de cada dial
-        # Centros (cx, cy) e raio de cada dial na imagem 4x
-        # Ajustados para imagem original ~378x291px
+        # Centros (cx, cy) e raio de cada dial — ajustados proporcionalmente ao tamanho original
         dials_coords = [
             (int(95  * (width / 378) * 4), int(130 * (height / 291) * 4), int(55 * (width / 378) * 4)),
             (int(178 * (width / 378) * 4), int(130 * (height / 291) * 4), int(55 * (width / 378) * 4)),
@@ -85,7 +79,7 @@ def pre_processar_imagem(image_bytes: bytes) -> str:
             ponteiro_mask = ndimage.binary_dilation(ponteiro_mask, iterations=4)
             rgb_arr[ponteiro_mask] = [220, 30, 30]
 
-        # 5. Salvar resultado e converter para base64
+        # 5. Salvar e converter para base64
         img_resultado = Image.fromarray(rgb_arr.astype(np.uint8))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_out:
             img_resultado.save(tmp_out.name)
@@ -147,16 +141,36 @@ async def ler_medidor(file: UploadFile = File(...)):
     try:
         contents = await file.read()
 
-        # Pré-processar imagem: cinza + contraste + ponteiros vermelhos
+        # Imagem original em base64
+        b64_original = base64.standard_b64encode(contents).decode("utf-8")
+        media_type = file.content_type or "image/jpeg"
+
+        # Imagem processada: cinza + contraste forte nos números + ponteiros vermelhos
         b64_processada = pre_processar_imagem(contents)
 
-        # Enviar imagem processada para Claude com instruções detalhadas
+        # Enviar AMBAS as imagens para Claude
         message = client.messages.create(
             model="claude-opus-4-5",
             max_tokens=512,
             messages=[{
                 "role": "user",
                 "content": [
+                    {
+                        "type": "text",
+                        "text": "IMAGEM 1 - Foto original do medidor:"
+                    },
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64_original
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "IMAGEM 2 - Mesma foto processada: tons de cinza com contraste forte nos números e PONTEIROS pintados de VERMELHO:"
+                    },
                     {
                         "type": "image",
                         "source": {
@@ -168,21 +182,20 @@ async def ler_medidor(file: UploadFile = File(...)):
                     {
                         "type": "text",
                         "text": (
-                            "Você está vendo um medidor de energia elétrica analógico com 4 dials. "
-                            "A imagem foi pré-processada: está em tons de cinza com contraste forte nos números "
-                            "e os PONTEIROS estão pintados de VERMELHO para facilitar a leitura. "
-                            "\n\n"
+                            "Use as DUAS imagens acima para fazer a leitura do medidor de energia elétrica analógico com 4 dials.\n"
+                            "Na IMAGEM 2 os PONTEIROS estão em VERMELHO — use isso para identificar com precisão onde cada ponteiro aponta.\n"
+                            "\n"
                             "SENTIDO DE LEITURA DE CADA DIAL:\n"
                             "- Dial 1 (mais à esquerda): sentido ANTI-HORÁRIO\n"
                             "- Dial 2: sentido HORÁRIO\n"
                             "- Dial 3: sentido ANTI-HORÁRIO\n"
                             "- Dial 4 (mais à direita): sentido HORÁRIO\n"
                             "\n"
-                            "REGRA DE LEITURA (aplique para cada dial no seu respectivo sentido):\n"
-                            "1. Observe onde a ponta do ponteiro VERMELHO está apontando.\n"
-                            "2. Identifique entre quais dois números consecutivos o ponteiro está.\n"
+                            "REGRA DE LEITURA para cada dial:\n"
+                            "1. Localize a PONTA do ponteiro VERMELHO na imagem 2.\n"
+                            "2. Veja entre quais dois números consecutivos a ponta está.\n"
                             "3. Retorne SEMPRE o MENOR dos dois números.\n"
-                            "4. Só retorne o maior se o ponteiro estiver EXATAMENTE sobre ele.\n"
+                            "4. Só retorne o maior se a ponta estiver EXATAMENTE sobre ele.\n"
                             "\n"
                             "Responda APENAS com JSON neste formato, sem mais nada:\n"
                             '{"digitos":[D1,D2,D3,D4],"leitura_kwh":DDDD}'
