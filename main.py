@@ -87,19 +87,16 @@ async def ler_medidor(file: UploadFile = File(...)):
                     {
                         "type": "text",
                         "text": (
-    "Você está vendo um medidor de energia elétrica analógico brasileiro com 4 dials (ponteiros). "
-    "Leia os dials da ESQUERDA para a DIREITA. "
-    "Regras obrigatórias: "
-    "1) Os dials alternam o sentido de rotação: o 1º gira no sentido HORÁRIO (números crescem para a direita), "
-    "o 2º gira no sentido ANTI-HORÁRIO (números crescem para a esquerda), "
-    "o 3º gira no sentido HORÁRIO, o 4º gira no sentido ANTI-HORÁRIO. "
-    "2) Para cada dial, identifique entre quais dois números consecutivos o ponteiro está parado. "
-    "3) Retorne SEMPRE o número que o ponteiro JÁ PASSOU, ou seja, o menor em termos de avanço do dial. "
-    "4) Só retorne o número maior se o ponteiro estiver EXATAMENTE em cima dele, sem dúvida. "
-    "5) Se o ponteiro estiver entre 9 e 0, retorne 9 (pois o 0 ainda não foi completamente atingido). "
-    "Responda APENAS com JSON neste formato exato, sem texto adicional: "
-    '{\"digitos\":[D1,D2,D3,D4],\"leitura_kwh\":DDDD}'
-                        )
+    "Você está vendo um medidor de energia elétrica analógico com 4 dials. "
+    "Leia os 4 dials da esquerda para a direita. "
+    "Dials 1 e 3 giram no sentido HORÁRIO. Dials 2 e 4 giram no sentido ANTI-HORÁRIO. "
+    "Para cada dial, retorne o número que o ponteiro JÁ PASSOU (o menor em avanço). "
+    "Só retorne o número maior se o ponteiro estiver EXATAMENTE em cima dele. "
+    "IMPORTANTE: responda SOMENTE com o JSON abaixo, sem nenhum texto antes ou depois, "
+    "sem explicação, sem markdown, sem asterisco: "
+    "{\"digitos\":[D1,D2,D3,D4],\"leitura_kwh\":DDDD}"
+)
+                        
                     }
                 ]
             }]
