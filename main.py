@@ -246,3 +246,20 @@ def historico():
         return {"leituras": carregar_leituras()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# ENDPOINT DE DEBUG — ver imagem processada
+# ─────────────────────────────────────────────
+from fastapi.responses import Response
+
+@app.post("/debug-imagem")
+async def debug_imagem(file: UploadFile = File(...)):
+    """Retorna a imagem processada (cinza + ponteiros vermelhos) para inspeção visual."""
+    try:
+        contents = await file.read()
+        b64_processada = pre_processar_imagem(contents)
+        img_bytes = base64.b64decode(b64_processada)
+        return Response(content=img_bytes, media_type="image/png")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
