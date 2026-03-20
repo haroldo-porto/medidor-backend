@@ -89,7 +89,7 @@ async def ler_medidor(file: UploadFile = File(...)):
                         "text": (
     "Você está vendo um medidor de energia elétrica analógico com 4 dials. "
     "Leia os 4 dials da esquerda para a direita. "
-    "Dials 1 e 3 giram no sentido HORÁRIO. Dials 2 e 4 giram no sentido ANTI-HORÁRIO. "
+    "Dials 1 e 3 giram no sentido Anti-HORÁRIO. Dials 2 e 4 giram no sentido HORÁRIO. "
     "Para cada dial, retorne o número que o ponteiro JÁ PASSOU (o menor em avanço). "
     "Só retorne o número maior se o ponteiro estiver EXATAMENTE em cima dele. "
     "IMPORTANTE: responda SOMENTE com o JSON abaixo, sem nenhum texto antes ou depois, "
